@@ -22,10 +22,7 @@ client = []
 maa-types = { workspace = true, features = ["serde", "prost"] }
 maa-sys = { workspace = true, features = ["runtime"] }
 
-tonic = { version = "0.12", default-features = false, features = [
-    "codegen",
-    "prost",
-] }
+tonic = { workspace = true, features = ["codegen", "prost"] }
 prost.workspace = true
 
 tokio = { workspace = true }
@@ -34,7 +31,7 @@ tokio-stream = { version = "0.1", default-features = false, features = [
 ] }
 tokio-util = "0.7.13"
 
-tracing = "0.1.41"
+tracing.workspace = true
 
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
@@ -52,5 +49,5 @@ maa-dirs.workspace = true
 tracing-subscriber = "0.3.19"
 hyper-util = { version = "0.1.10", default-features = false }
 tower = { version = "0.5.2" }
-tonic = { version = "0.12", features = ["transport"] }
+tonic = { workspace = true, features = ["transport"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }

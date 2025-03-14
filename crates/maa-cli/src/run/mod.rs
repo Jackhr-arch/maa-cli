@@ -4,6 +4,8 @@
 mod callback;
 use callback::summary::{self, SummarySubscriber};
 
+mod daemon;
+
 mod external;
 
 pub mod preset;
@@ -238,7 +240,7 @@ where
 {
     let mut rx = summary::init_pipe();
 
-    let ret = run_core(f, args, &mut rx);
+    let ret = daemon::run::run_core(f, args, &mut rx);
 
     summary::display(rx);
 

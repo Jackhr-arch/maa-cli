@@ -47,6 +47,19 @@ impl Args {
         }
     }
 
+    #[cfg(feature = "daemon")]
+    fn to_filter_t(&self) -> tracing::level_filters::LevelFilter {
+        use tracing::level_filters::LevelFilter;
+        match self.log_level() {
+            0 => LevelFilter::OFF,
+            1 => LevelFilter::ERROR,
+            2 => LevelFilter::WARN,
+            3 => LevelFilter::INFO,
+            4 => LevelFilter::DEBUG,
+            _ => LevelFilter::TRACE,
+        }
+    }
+
     // Accessors only used in tests
     // this function consumes entire self, while in init_logger()
     // we need to use self.log_file, which only consumes part of self
@@ -55,6 +68,7 @@ impl Args {
         log_path(self.log_file)
     }
 
+    #[cfg(not(feature = "daemon"))]
     pub fn init_logger(self) -> anyhow::Result<()> {
         let mut builder = env_logger::Builder::new();
 
@@ -75,6 +89,32 @@ impl Args {
 
         builder.init();
 
+        Ok(())
+    }
+
+    #[cfg(feature = "daemon")]
+    pub fn init_logger(self) -> anyhow::Result<()> {
+        let layer = tracing_subscriber::fmt().with_ansi(true).compact();
+        let filter = self.to_filter_t();
+
+        if let Some(path) = log_path(self.log_file) {
+            if let Some(dir) = path.parent() {
+                use crate::dirs::Ensure;
+                dir.ensure()?;
+            }
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
+            let (non_blocking, _guard) = tracing_appender::non_blocking(file);
+
+            layer
+                .with_writer(non_blocking)
+                .with_max_level(filter)
+                .init();
+        } else {
+            layer.with_max_level(filter).init();
+        }
         Ok(())
     }
 }
