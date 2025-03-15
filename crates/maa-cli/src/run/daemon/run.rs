@@ -2,15 +2,23 @@ use std::sync::Arc;
 
 use crate::{
     config::{asst::AsstConfig, task::TaskConfig},
-    run::{callback::summary::SummarySubscriber, find_profile, resource, CommonArgs},
+    run::{
+        callback::summary::{self, SummarySubscriber},
+        external, find_profile, resource, CommonArgs,
+    },
 };
 use anyhow::{Context, Result};
 use maa_dirs::{self as dirs};
 
-use maa_server::{core::core_client::CoreClient, prelude::*, task::NewTaskRequest};
+use maa_server::{
+    core::core_client::CoreClient,
+    prelude::*,
+    task::{task_client::TaskClient, NewTaskRequest},
+};
 use maa_types::TaskStateType;
 use tempfile::NamedTempFile;
 use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 use tonic::transport::{Channel, Endpoint};
 
 #[tokio::main]
@@ -21,12 +29,29 @@ where
     // Auto update hot update resource
     resource::update(true)?;
 
-    let socket = NamedTempFile::new().unwrap();
-    let socket = Arc::new(socket.into_temp_path());
+    let socket = Arc::new(NamedTempFile::new()?.into_temp_path());
     tracing::info!("Socket: {}", socket.display());
 
-    tokio::spawn(super::host::start_daemon(Arc::clone(&socket)));
+    let cancel_token = CancellationToken::new();
+    tokio::select! {
+        () = super::host::start_daemon(Arc::clone(&socket), cancel_token.child_token()) => { },
+        ret = run_client(f, socket,  args, rx) => { ret? },
+        () = super::host::wait_for_signal() => {  },
+    }
+    cancel_token.cancel();
 
+    Ok(())
+}
+
+async fn run_client<F>(
+    f: F,
+    socket: Arc<tempfile::TempPath>,
+    args: CommonArgs,
+    rx: &mut SummarySubscriber,
+) -> Result<()>
+where
+    F: FnOnce(&AsstConfig) -> Result<TaskConfig>,
+{
     // Load asst config
     let mut asst_config = find_profile(dirs::config(), args.profile.as_deref())?;
 
@@ -52,8 +77,24 @@ where
     let mut coreclient = CoreClient::new(channel.clone());
     load_and_setup_core(&asst_config, &mut coreclient).await?;
 
-    let mut taskclient = maa_server::task::task_client::TaskClient::new(channel);
+    let mut taskclient = TaskClient::new(channel);
 
+    // Launch external app like PlayCover or Emulator
+    // Only support PlayCover on macOS now, may support more in the future
+    let app: Option<Box<dyn external::ExternalApp>> = match asst_config.connection.preset() {
+        #[cfg(target_os = "macos")]
+        crate::config::asst::Preset::PlayCover => Some(Box::new(external::PlayCoverApp::new(
+            task_config.client_type,
+            address.as_ref(),
+        ))),
+        _ => None,
+    };
+
+    // Startup external app
+    if let (Some(app), true) = (app.as_deref(), task_config.start_app) {
+        app.open().await.context("Failed to open external app")?;
+    }
+    
     let session_id = taskclient
         .new_connection(maa_server::task::NewConnectionRequest {
             conncfg: Some(asst_config.connection.into()),
@@ -85,36 +126,52 @@ where
                     "Failed to add task {} with params: {task_params}",
                     task.name_or_default(),
                 )
-            })?;
+            })?
+            .into_inner()
+            .id;
 
-        tracing::info!("New task[{}]({})", task_type, id.into_inner().id);
+        tracing::info!("New task[{}]({})", task_type, id);
+        summary::insert(id, task.name, task_type);
     }
 
-    taskclient
-        .start_tasks(make_request((), &session_id))
-        .await?;
+    if !args.dry_run {
+        taskclient
+            .start_tasks(make_request((), &session_id))
+            .await?;
 
-    let mut ch = taskclient
-        .task_state_update(make_request((), &session_id))
-        .await?
-        .into_inner();
+        let mut ch = taskclient
+            .task_state_update(make_request((), &session_id))
+            .await?
+            .into_inner();
 
-    while let Some(st) = ch.next().await {
-        if st.unwrap().state() == TaskStateType::AllTasksCompleted {
-            break;
+        while let Some(st) = ch.next().await {
+            let st = st.unwrap();
+            let code = st.state();
+            let json = serde_json::from_str(&st.content).unwrap();
+            super::super::callback::process_message(code.into(), json);
+            if let Some(updated) = rx.try_update() {
+                print!("{}", updated)
+            }
+            if code == TaskStateType::AllTasksCompleted {
+                break;
+            }
         }
-    }
 
-    taskclient.stop_tasks(make_request((), &session_id)).await?;
+        taskclient.stop_tasks(make_request((), &session_id)).await?;
+    }
 
     taskclient
         .close_connection(make_request((), &session_id))
         .await?;
 
+    // Close external app
+    if let (Some(app), true) = (app.as_deref(), task_config.close_app) {
+        app.close().await.context("Failed to close external app")?;
+    }
+
     if !coreclient.unload_core(()).await?.into_inner() {
         tracing::warn!("Failed to shutdown server");
     }
-
     Ok(())
 }
 

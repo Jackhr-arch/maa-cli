@@ -113,7 +113,10 @@ impl Args {
                 .with_max_level(filter)
                 .init();
         } else {
-            layer.with_max_level(filter).init();
+            layer
+                .with_writer(std::io::stderr)
+                .with_max_level(filter)
+                .init();
         }
         Ok(())
     }

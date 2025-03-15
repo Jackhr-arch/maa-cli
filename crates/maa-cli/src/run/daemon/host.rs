@@ -1,12 +1,9 @@
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
-pub async fn start_daemon(path: Arc<tempfile::TempPath>) {
+pub async fn start_daemon(path: Arc<tempfile::TempPath>, cancel_token: CancellationToken) {
     use maa_server::prelude::*;
-    use tokio_util::sync::CancellationToken;
     use tonic::transport::Server;
-
-    let parent_cancel_token = CancellationToken::new();
-    let cancel_token = parent_cancel_token.child_token();
 
     let timeout = std::time::Duration::from_micros(100);
 
@@ -15,11 +12,6 @@ pub async fn start_daemon(path: Arc<tempfile::TempPath>) {
         // need to be the parent node
         .add_service(core_service(cancel_token))
         .add_service(task_service());
-    if path.exists() {
-        std::fs::remove_file(&*path).unwrap()
-    } else {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap()
-    }
     let stream = tokio_stream::wrappers::UnixListenerStream::new(
         tokio::net::UnixListener::bind(&*path).unwrap(),
     );

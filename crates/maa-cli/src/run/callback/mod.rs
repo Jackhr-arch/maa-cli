@@ -73,7 +73,7 @@ impl From<AsstMsgId> for AsstMsg {
     }
 }
 
-fn process_message(code: AsstMsgId, json: Value) {
+pub fn process_message(code: AsstMsgId, json: Value) {
     if !json.is_object() {
         return;
     }
