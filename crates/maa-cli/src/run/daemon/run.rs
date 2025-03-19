@@ -30,13 +30,14 @@ where
     resource::update(true)?;
 
     let socket = Arc::new(NamedTempFile::new()?.into_temp_path());
+    std::fs::remove_file(&*socket)?;
     tracing::info!("Socket: {}", socket.display());
 
     let cancel_token = CancellationToken::new();
     tokio::select! {
+        () = super::host::wait_for_signal() => {  },
         () = super::host::start_daemon(Arc::clone(&socket), cancel_token.child_token()) => { },
         ret = run_client(f, socket,  args, rx) => { ret? },
-        () = super::host::wait_for_signal() => {  },
     }
     cancel_token.cancel();
 
@@ -90,18 +91,22 @@ where
         _ => None,
     };
 
-    // Startup external app
-    if let (Some(app), true) = (app.as_deref(), task_config.start_app) {
-        app.open().await.context("Failed to open external app")?;
+    let session_id = if !args.dry_run {
+        // Startup external app
+        if let (Some(app), true) = (app.as_deref(), task_config.start_app) {
+            app.open().await.context("Failed to open external app")?;
+        }
+
+        taskclient
+            .new_connection(maa_server::task::NewConnectionRequest {
+                conncfg: Some(asst_config.connection.into()),
+                instcfg: Some(asst_config.instance_options.into()),
+            })
+            .await
+    } else {
+        taskclient.test_connection(()).await
     }
-    
-    let session_id = taskclient
-        .new_connection(maa_server::task::NewConnectionRequest {
-            conncfg: Some(asst_config.connection.into()),
-            instcfg: Some(asst_config.instance_options.into()),
-        })
-        .await
-        .map(|resp| resp.into_inner())?;
+    .map(|resp| resp.into_inner())?;
 
     for task in task_config.tasks {
         let task_type = task.task_type;
@@ -158,16 +163,16 @@ where
         }
 
         taskclient.stop_tasks(make_request((), &session_id)).await?;
+
+        // Close external app
+        if let (Some(app), true) = (app.as_deref(), task_config.close_app) {
+            app.close().await.context("Failed to close external app")?;
+        }
     }
 
     taskclient
         .close_connection(make_request((), &session_id))
         .await?;
-
-    // Close external app
-    if let (Some(app), true) = (app.as_deref(), task_config.close_app) {
-        app.close().await.context("Failed to close external app")?;
-    }
 
     if !coreclient.unload_core(()).await?.into_inner() {
         tracing::warn!("Failed to shutdown server");
@@ -190,7 +195,7 @@ async fn load_and_setup_core(
         .load_core(maa_server::core::CoreConfig {
             static_ops: Some(config.static_options.clone().into()),
             log_ops: Some(maa_server::core::core_config::LogOptions {
-                path: "/home/maa/".to_owned(),
+                path: maa_dirs::log().to_string_lossy().to_string(),
                 level: maa_server::core::core_config::LogLevel::Debug.into(),
             }),
             lib_path: maa_dirs::find_library()
